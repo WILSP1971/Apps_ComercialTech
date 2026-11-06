@@ -1,0 +1,36 @@
+# infra/docker-compose.yml
+services:
+  api:
+    build: { context: .., dockerfile: apps/api/Dockerfile }
+    env_file: ./.env.api
+    restart: unless-stopped
+    ports: ["127.0.0.1:3001:3001"]
+    networks: [supabase]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/v1/salud"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: https://api.sierrainnova.tech
+        NEXT_PUBLIC_SUPABASE_URL: https://auth.sierrainnova.tech
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+    restart: unless-stopped
+    ports: ["127.0.0.1:3000:3000"]
+
+  reportes:
+    build: { context: ../apps/reportes-py }
+    env_file: ./.env.reportes
+    restart: unless-stopped
+    ports: ["127.0.0.1:8000:8000"]
+    networks: [supabase]
+
+networks:
+  supabase:
+    external: true
+    name: supabase-docker_default      # nombre de la red creada por el compose de Supabase (verificar con: docker network ls)

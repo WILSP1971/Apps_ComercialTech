@@ -1,0 +1,24 @@
+{
+  "name": "crm-inteligente",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "lint:arq": "depcruise apps/api/src --config .dependency-cruiser.cjs",
+    "db:aplicar": "bash db/aplicar-scripts.sh",
+    "db:reglas": "bash db/probar-reglas.sh"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0",
+    "typescript": "^5.6.0",
+    "prettier": "^3.3.0",
+    "dependency-cruiser": "^16.8.0"
+  }
+}

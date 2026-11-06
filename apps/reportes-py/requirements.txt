@@ -1,0 +1,7 @@
+# requirements.txt
+fastapi
+uvicorn[standard]
+psycopg[binary,pool]
+PyJWT[crypto]
+pandas
+openpyxl
