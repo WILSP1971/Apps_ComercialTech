@@ -71,7 +71,7 @@ VALUES ('<empresa.id>', 'FACTURA', 'FE', '000000', 1, 100000, 0, current_date + 
 ## Subir a GitHub
 
 ```bash
-bash subir-a-github.sh     # git init + commit + push a WILSP1971/Apps_ComercialTech (rama main)
+bash subir-a-github.sh     # git init + commit + push a WILSP1971/CRM_Inteligente (rama main)
 ```
 
 ## Calidad
@@ -93,3 +93,8 @@ Inventarios, Fabricación, Caja, Facturación, Compras, Despacho, Catálogo y Se
 clave y las reglas R1-R14. Antes de producción falta: instalar dependencias y correr el *build*/pruebas,
 pruebas de integración con PostgreSQL real, UI completa por rol, adaptador de facturación electrónica (DIAN)
 y pasarela de pagos.
+
+
+## Módulos Compras y Despacho
+Implementados de extremo a extremo (dominio, casos de uso, API, comandos offline, pantallas `/compras` y `/despacho`).
+Aplicar la migración `db/scripts/110_compras_despacho.sql` y ver la sección 18 de `docs/GUIA.md`.

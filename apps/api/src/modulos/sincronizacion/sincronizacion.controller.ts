@@ -17,9 +17,10 @@ const PushSchema = z.object({
 // (El cliente web no sincroniza: usa los endpoints /tienda.)
 const TABLAS_POR_ROL: Record<string, string[]> = {
   vendedor: ['catalogo.articulo','catalogo.cliente','pedidos.cliente','pedidos.pedido','pedidos.pedido_linea',
-             'inventarios.bodega','inventarios.existencia','caja.caja','caja.sesion_caja','caja.movimiento_caja','facturacion.factura'],
+             'inventarios.bodega','inventarios.existencia','caja.caja','caja.sesion_caja','caja.movimiento_caja','facturacion.factura',
+             'despacho.despacho','despacho.despacho_linea'],
   supervisor_ventas: ['catalogo.articulo','catalogo.cliente','pedidos.cliente','pedidos.pedido','pedidos.pedido_linea','pedidos.aprobacion',
-                      'inventarios.existencia'],
+                      'inventarios.existencia','despacho.despacho','despacho.despacho_linea'],
   bodeguero: ['catalogo.articulo','inventarios.bodega','inventarios.existencia','inventarios.conteo','inventarios.conteo_linea',
               'compras.proveedor','compras.orden_compra','compras.orden_compra_linea','compras.recepcion','compras.recepcion_linea',
               'pedidos.pedido','pedidos.pedido_linea','despacho.despacho','despacho.despacho_linea'],
@@ -29,7 +30,7 @@ const TABLAS_POR_ROL: Record<string, string[]> = {
   contador: ['catalogo.cliente','pedidos.cliente','pedidos.pedido','facturacion.factura','facturacion.factura_linea',
              'facturacion.pago_factura','facturacion.nota_credito','caja.caja','caja.sesion_caja','caja.movimiento_caja','caja.arqueo'],
   comprador: ['catalogo.articulo','inventarios.existencia','compras.proveedor','compras.orden_compra','compras.orden_compra_linea',
-              'compras.recepcion','compras.recepcion_linea'],
+              'compras.recepcion','compras.recepcion_linea','inventarios.bodega'],
   administrador: ['*'],
 };
 

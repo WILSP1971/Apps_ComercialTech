@@ -30,6 +30,14 @@ class BdLocal extends Dexie {
   sesiones_caja!: Table<any, string>;
   movimientos_caja!: Table<any, string>;
   facturas!: Table<any, string>;
+  // Compras y Despacho
+  proveedores!: Table<any, string>;
+  ordenes_compra!: Table<any, string>;
+  orden_compra_lineas!: Table<any, string>;
+  recepciones!: Table<any, string>;
+  recepcion_lineas!: Table<any, string>;
+  despachos!: Table<any, string>;
+  despacho_lineas!: Table<any, string>;
   // Infraestructura offline
   outbox!: Table<Operacion, string>;
   meta!: Table<{ clave: string; valor: unknown }, string>;
@@ -52,6 +60,16 @@ class BdLocal extends Dexie {
       outbox: 'idempotencyKey, estado, creadoEn',
       meta: 'clave',
     });
+    // v2: módulos Compras y Despacho (las tablas anteriores no cambian)
+    this.version(2).stores({
+      proveedores: 'id, nit, razon_social',
+      ordenes_compra: 'id, estado, proveedor_id, creado_en',
+      orden_compra_lineas: 'id, orden_id',
+      recepciones: 'id, orden_id, creado_en',
+      recepcion_lineas: 'id, recepcion_id',
+      despachos: 'id, estado, pedido_id, creado_en',
+      despacho_lineas: 'id, despacho_id, pedido_linea_id',
+    });
   }
 }
 export const db = new BdLocal();
@@ -70,4 +88,11 @@ export const TABLAS_LOCALES: Record<string, keyof BdLocal & string> = {
   'caja.sesion_caja': 'sesiones_caja',
   'caja.movimiento_caja': 'movimientos_caja',
   'facturacion.factura': 'facturas',
+  'compras.proveedor': 'proveedores',
+  'compras.orden_compra': 'ordenes_compra',
+  'compras.orden_compra_linea': 'orden_compra_lineas',
+  'compras.recepcion': 'recepciones',
+  'compras.recepcion_linea': 'recepcion_lineas',
+  'despacho.despacho': 'despachos',
+  'despacho.despacho_linea': 'despacho_lineas',
 };

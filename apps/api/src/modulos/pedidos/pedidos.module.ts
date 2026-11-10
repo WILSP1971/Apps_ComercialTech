@@ -40,8 +40,9 @@ export class PedidosModule implements OnModuleInit {
     this.sync.registrar('pedidos.pedido.guardar_borrador', async (u, datos) => {
       await this.guardar.ejecutar(u.empresaId, u.id, datos); return {};
     });
-    this.sync.registrar('pedidos.pedido.confirmar', (u, datos: any) =>
-      this.confirmar.ejecutar({ empresaId: u.empresaId, pedidoId: datos.pedidoId, usuarioId: u.id }));
+    this.sync.registrar('pedidos.pedido.confirmar', async (u, datos: any) => ({
+      ...(await this.confirmar.ejecutar({ empresaId: u.empresaId, pedidoId: datos.pedidoId, usuarioId: u.id })),
+    }));
 
     // 2) Mantener el modelo de cliente de Pedidos a partir del catálogo (el límite de crédito lo fija el supervisor/admin)
     const upsertCliente = async (e: any) => {

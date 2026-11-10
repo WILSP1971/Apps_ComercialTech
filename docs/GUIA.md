@@ -4584,3 +4584,53 @@ Los tiempos son referencias para un equipo pequeño (2–3 desarrolladores) y de
 6. **Política de conflictos** para catálogos (última escritura gana vs. revisión manual).
 7. **Volumen esperado** (documentos/día, usuarios concurrentes) para validar el VPS y el uso del bloqueo consultivo en `sync.fn_registrar_cambio`.
 8. **Versiones:** fijar versiones exactas en `pnpm-lock.yaml` y revisar la documentación vigente de Next.js, Serwist, Supabase y NestJS al iniciar, ya que sus APIs evolucionan con rapidez.
+
+
+---
+
+## 18. Módulos Compras y Despacho (implementación completa)
+
+Ambos módulos siguen el patrón de Pedidos: **dominio puro** (sin imports de framework) → **aplicación** (casos de uso transaccionales) → **infraestructura** (repos `pg`, adaptadores) → **presentación** (controladores REST + comandos offline).
+
+### 18.1 Compras
+
+| Pieza | Archivo | Responsabilidad |
+|---|---|---|
+| Agregado `OrdenCompra` | `compras/dominio/orden-compra.ts` | Estados BORRADOR → PENDIENTE_APROBACION → APROBADA → ENVIADA → RECIBIDA_PARCIAL → RECIBIDA → CERRADA / ANULADA; segregación de funciones (quien crea no aprueba por encima del umbral `OC_UMBRAL_SEGREGACION`, por defecto 5.000.000); **R11** en `cerrar()`; recepción atómica (todo o nada) |
+| Agregado `Proveedor` | `compras/dominio/proveedor.ts` | NIT, correo y plazo validados; no se desactiva con órdenes abiertas |
+| Casos de uso | `compras/aplicacion/*` | Guardar proveedor, borrador, transiciones, registrar recepción (idempotente por `recepcionId`) |
+| API | `/v1/compras/...`, `/v1/compras/proveedores` | Permisos `compras.proveedor.gestionar`, `compras.orden.crear/aprobar/ver`, `compras.recepcion.registrar` |
+| Offline | `compras.proveedor.guardar`, `compras.orden.guardar_borrador`, `compras.recepcion.registrar` | El comprador deja borradores y el bodeguero recibe sin conexión; aprobar/enviar/cerrar/anular exigen conexión |
+
+**Evento clave:** `compras.RecepcionRegistrada` (vía Outbox) → Inventarios asienta `ENTRADA_COMPRA` en el kardex (R5) con el costo de la línea de la orden. La vista `compras.v_pendiente_recibir` alimenta la pantalla del bodeguero.
+
+**R11 en dos capas:** el agregado rechaza `cerrar()` con `R11_OC_SIN_RECIBIR` y el trigger `trg_r11_cierre_oc` (SQLSTATE 23514) lo garantiza aunque alguien escriba directo en la BD.
+
+### 18.2 Despacho
+
+| Pieza | Archivo | Responsabilidad |
+|---|---|---|
+| Agregado `Despacho` | `despacho/dominio/despacho.ts` | PROGRAMADO → DESPACHADO → ENTREGADO / FALLIDO (→ reintento) y CANCELADO (solo antes de despachar); **R12** al programar: sin reservas activas no existe despacho |
+| Programar | `aplicacion/programar-despacho.ts` | Toma las reservas ACTIVAS del pedido no asignadas a otro despacho (admite despacho parcial por `pedidoLineaIds`); idempotente por `despachoId` |
+| Despachar | `aplicacion/despachar-pedido.ts` | `InventariosApi.consumirReservas` + kardex `SALIDA_DESPACHO` + cambio de estado + evento, **en una sola transacción**. Calcula `completo` comparando cantidades pedidas contra lo despachado |
+| Entrega | `aplicacion/transiciones-despacho.ts` | Entregar (receptor y evidencia), fallida, reintentar, cancelar, actualizar logística |
+| API | `/v1/despachos/...` | Permisos `despacho.despacho.ver/gestionar` |
+| Offline | `despacho.despacho.registrar`, `.entregar`, `.fallido` | El bodeguero y el transportador trabajan sin conexión; si al sincronizar la reserva ya no está activa, la operación vuelve **RECHAZADA** con `R12_SIN_RESERVA_ACTIVA` |
+
+**Acoplamiento controlado:** Despacho no lee tablas de otros esquemas. Usa `PedidosApi.obtenerParaDespachar` e `InventariosApi` mediante adaptadores anti-corrupción (`pedidos.adaptador.ts`, `inventarios.adaptador.ts`).
+
+**R12 en tres capas:** agregado (`Despacho.programar`), caso de uso (`consumirReservas` falla si alguna reserva no está ACTIVA) y trigger `trg_r12_despacho` (no se pasa a DESPACHADO si hay líneas sin reserva CONSUMIDA).
+
+**Corrección respecto a la versión anterior:** antes `completo` se deducía de `cantidad_a_fabricar > 0`; ahora se calcula con lo realmente despachado por línea, de modo que los despachos parciales no marcan el pedido como DESPACHADO.
+
+### 18.3 Base de datos y despliegue
+
+```bash
+psql -U crm_app -d crm -f db/scripts/110_compras_despacho.sql   # idempotente
+psql -U crm_app -d crm -f db/tests/compras_despacho.sql          # R11 y R12 (todo se revierte)
+```
+
+### 18.4 Otros cambios incluidos
+- `FiltroErrores` global: los errores de negocio responden **422** `{codigo, mensaje}` (antes 500) y Zod responde 400.
+- Corregidos dos defectos de compilación previos: imports faltantes en `aprobar-pedido.ts` y el tipo de retorno del comando `pedidos.pedido.confirmar`.
+- Web: pantallas `/compras` y `/despacho`, tablas Dexie v2 y repos offline; `TABLAS_POR_ROL` ampliado (vendedor y supervisor ven el estado de los despachos).

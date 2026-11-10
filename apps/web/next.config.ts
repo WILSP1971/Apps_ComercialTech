@@ -9,5 +9,4 @@ const withSerwist = withSerwistInit({
 
 export default withSerwist({
   reactStrictMode: true,
-  output: 'standalone',            // imagen Docker liviana
 });
