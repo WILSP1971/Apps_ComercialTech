@@ -17,7 +17,15 @@ export default function Login() {
     setError(null); setCargando(true);
     const { error } = await supabase.auth.signInWithPassword({ email: correo, password: clave });
     setCargando(false);
-    if (error) { setError('El correo o la contraseña no coinciden. Revise e intente de nuevo.'); return; }
+    if (error) {
+      const m = (error.message ?? '').toLowerCase();
+      setError(m.includes('invalid login') ? 'El correo o la contraseña no coinciden. Revise e intente de nuevo.'
+        : m.includes('confirm') ? 'El correo aún no está confirmado en Supabase.'
+        : m.includes('api key') || m.includes('apikey') ? 'La llave pública de Supabase no es válida en este sitio (revise NEXT_PUBLIC_SUPABASE_ANON_KEY).'
+        : m.includes('fetch') || m.includes('network') ? 'No se pudo conectar con el servicio de autenticación.'
+        : `No se pudo iniciar sesión: ${error.message}`);
+      return;
+    }
     window.location.replace('/');
   }
 
