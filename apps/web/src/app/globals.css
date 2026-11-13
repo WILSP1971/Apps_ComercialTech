@@ -1,3 +1,85 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* ============ Tokens (tema oscuro ERP) ============ */
+:root {
+  --c-fondo: 13 17 23;       /* #0D1117 */
+  --c-panel: 22 27 36;       /* #161B24 */
+  --c-panel2: 29 35 48;      /* #1D2330 */
+  --c-borde: 42 50 66;       /* #2A3242 */
+  --c-texto: 231 236 244;    /* #E7ECF4 */
+  --c-suave: 139 149 167;    /* #8B95A7 */
+  --c-azul: 59 130 246;      /* #3B82F6 */
+  --c-verde: 34 197 94;      /* #22C55E */
+  --c-ambar: 245 158 11;     /* #F59E0B */
+  --c-rojo: 239 68 68;       /* #EF4444 */
+  --c-violeta: 139 92 246;   /* #8B5CF6 */
+  --fuente: 'Inter', 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif;
+  color-scheme: dark;
+}
+
+html { background: rgb(var(--c-fondo)); }
+body {
+  font-family: var(--fuente);
+  background: rgb(var(--c-fondo));
+  color: rgb(var(--c-texto));
+  font-feature-settings: 'tnum' 1, 'cv11' 1;   /* cifras tabulares: las columnas de dinero se alinean */
+  -webkit-font-smoothing: antialiased;
+}
+::selection { background: rgb(var(--c-azul) / .35); }
+:focus-visible { outline: 2px solid rgb(var(--c-azul)); outline-offset: 2px; border-radius: 6px; }
+
+@layer components {
+  /* ---- Superficies ---- */
+  .tarjeta { @apply min-w-0 rounded-tarjeta border border-borde bg-panel; }
+  .tarjeta-cabecera { @apply flex items-center justify-between gap-3 border-b border-borde px-4 py-3; }
+  .tarjeta-cuerpo { @apply p-4; }
+  .titulo-seccion { @apply text-[15px] font-semibold tracking-tight text-texto; }
+  .subtitulo { @apply text-xs text-suave; }
+
+  /* ---- Botones ---- */
+  .btn { @apply inline-flex items-center justify-center gap-2 rounded-lg border border-borde bg-panel2 px-3.5 py-2 text-sm font-medium text-texto transition-colors hover:bg-borde/60 disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-panel2; }
+  .btn-primario { @apply border-transparent bg-azul text-white hover:bg-azul/85 disabled:hover:bg-azul; }
+  .btn-exito { @apply border-transparent bg-verde/90 text-fondo hover:bg-verde disabled:hover:bg-verde/90; }
+  .btn-peligro { @apply border-rojo/50 bg-rojo/10 text-rojo hover:bg-rojo/20 disabled:hover:bg-rojo/10; }
+  .btn-peligro-solido { @apply border-transparent bg-rojo/90 text-white hover:bg-rojo disabled:hover:bg-rojo/90; }
+  .btn-sm { @apply px-2.5 py-1 text-xs; }
+  .btn-bloque { @apply w-full py-2.5; }
+
+  /* ---- Campos ---- */
+  .campo { @apply w-full rounded-lg border border-borde bg-fondo/60 px-3 py-2 text-sm text-texto placeholder:text-suave/70 transition-colors hover:border-suave/50 focus:border-azul focus:outline-none disabled:opacity-50; }
+  .etiqueta { @apply mb-1 block text-xs font-medium text-suave; }
+
+  /* ---- Tablas ---- */
+  .tabla { @apply w-full border-collapse text-sm; }
+  .tabla thead th { @apply bg-panel2 px-3 py-2.5 text-left text-xs font-medium text-suave first:rounded-l-lg last:rounded-r-lg; }
+  .tabla tbody td { @apply border-b border-borde/70 px-3 py-3 align-middle; }
+  .tabla tbody tr:last-child td { @apply border-b-0; }
+  .tabla tbody tr { @apply transition-colors hover:bg-panel2/50; }
+  .num { @apply whitespace-nowrap text-right tabular-nums; }
+  .nowrap { @apply whitespace-nowrap; }
+
+  /* ---- Insignias ---- */
+  .insignia { @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border px-2 py-0.5 text-xs font-medium; }
+  .i-verde { @apply border-verde/30 bg-verde/10 text-verde; }
+  .i-ambar { @apply border-ambar/30 bg-ambar/10 text-ambar; }
+  .i-rojo { @apply border-rojo/30 bg-rojo/10 text-rojo; }
+  .i-azul { @apply border-azul/30 bg-azul/10 text-azul; }
+  .i-violeta { @apply border-violeta/30 bg-violeta/10 text-violeta; }
+  .i-gris { @apply border-borde bg-panel2 text-suave; }
+
+  /* ---- Avisos en línea ---- */
+  .aviso-caja { @apply flex items-start gap-3 rounded-lg border px-3.5 py-2.5 text-sm; }
+  .a-verde { @apply border-verde/30 bg-verde/10 text-verde; }
+  .a-ambar { @apply border-ambar/30 bg-ambar/10 text-ambar; }
+  .a-rojo { @apply border-rojo/30 bg-rojo/10 text-rojo; }
+  .a-azul { @apply border-azul/30 bg-azul/10 text-azul; }
+}
+
+/* Barra de desplazamiento discreta */
+* { scrollbar-width: thin; scrollbar-color: rgb(var(--c-borde)) transparent; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+}

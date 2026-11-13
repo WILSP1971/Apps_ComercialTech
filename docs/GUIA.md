@@ -1324,33 +1324,18 @@ CALL sync.habilitar('despacho', 'despacho');
 CALL sync.habilitar('despacho', 'despacho_linea');
 ```
 
-### 6.13 `080_seguridad_rls.sql` (Row Level Security para Supabase)
+### 6.13 `080_seguridad_rls.sql` (señal de sincronización y, si hay Supabase, Row Level Security)
 
 El backend usa un rol propietario de las tablas (no sujeto a RLS). Si algún cliente consulta directamente por Supabase
 (por ejemplo, Realtime), las políticas garantizan el aislamiento por empresa.
 
 ```sql
 -- db/scripts/080_seguridad_rls.sql
-CREATE OR REPLACE FUNCTION seguridad.empresas_del_usuario() RETURNS SETOF uuid
-LANGUAGE sql STABLE SECURITY DEFINER AS $$
-  SELECT empresa_id FROM seguridad.usuario_empresa WHERE usuario_id = auth.uid() AND activo
-$$;
-
--- Lectura por empresa en todas las tablas con empresa_id
-DO $$
-DECLARE t record;
-BEGIN
-  FOR t IN
-    SELECT table_schema, table_name FROM information_schema.columns
-    WHERE column_name = 'empresa_id'
-      AND table_schema IN ('catalogo','pedidos','inventarios','fabricacion','facturacion','caja','compras','despacho')
-  LOOP
-    EXECUTE format('ALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY', t.table_schema, t.table_name);
-    EXECUTE format($f$CREATE POLICY p_lectura_empresa ON %I.%I FOR SELECT TO authenticated
-                      USING (empresa_id IN (SELECT seguridad.empresas_del_usuario()))$f$,
-                   t.table_schema, t.table_name);
-  END LOOP;
-END $$;
+-- Idempotente y compatible con PostgreSQL común:
+--  * La tabla/trigger de señal (sync.senal) se crea SIEMPRE.
+--  * Row Level Security y Realtime solo se configuran si existe Supabase
+--    (esquema "auth" con auth.uid(), rol "authenticated" y publicación "supabase_realtime").
+--    En un PostgreSQL sin Supabase la API ya filtra por empresa y la RLS no aplica.
 
 -- Tabla "señal" liviana: Realtime avisa de cambios sin exponer datos de negocio
 CREATE TABLE IF NOT EXISTS sync.senal (
@@ -1358,10 +1343,6 @@ CREATE TABLE IF NOT EXISTS sync.senal (
   secuencia   bigint NOT NULL,
   actualizado timestamptz NOT NULL DEFAULT now()
 );
-ALTER TABLE sync.senal ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p_senal_lectura ON sync.senal FOR SELECT TO authenticated
-  USING (empresa_id IN (SELECT seguridad.empresas_del_usuario()));
-ALTER PUBLICATION supabase_realtime ADD TABLE sync.senal;
 
 CREATE OR REPLACE FUNCTION sync.fn_actualizar_senal() RETURNS trigger AS $$
 BEGIN
@@ -1370,8 +1351,50 @@ BEGIN
   RETURN NULL;
 END; $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_senal ON sync.cambios;
 CREATE TRIGGER trg_senal AFTER INSERT ON sync.cambios
 FOR EACH ROW EXECUTE FUNCTION sync.fn_actualizar_senal();
+
+-- ---- Parte exclusiva de Supabase ----
+DO $$
+DECLARE t record;
+BEGIN
+  IF to_regprocedure('auth.uid()') IS NULL
+     OR NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    RAISE NOTICE 'Supabase no detectado (auth.uid() / rol authenticated): se omiten RLS y Realtime';
+    RETURN;
+  END IF;
+
+  EXECUTE $f$
+    CREATE OR REPLACE FUNCTION seguridad.empresas_del_usuario() RETURNS SETOF uuid
+    LANGUAGE sql STABLE SECURITY DEFINER AS $b$
+      SELECT empresa_id FROM seguridad.usuario_empresa WHERE usuario_id = auth.uid() AND activo
+    $b$ $f$;
+
+  -- Lectura por empresa en todas las tablas con empresa_id
+  FOR t IN
+    SELECT DISTINCT table_schema, table_name FROM information_schema.columns
+     WHERE column_name = 'empresa_id'
+       AND table_schema IN ('catalogo','pedidos','inventarios','fabricacion','facturacion','caja','compras','despacho')
+  LOOP
+    EXECUTE format('ALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY', t.table_schema, t.table_name);
+    EXECUTE format('DROP POLICY IF EXISTS p_lectura_empresa ON %I.%I', t.table_schema, t.table_name);
+    EXECUTE format($f$CREATE POLICY p_lectura_empresa ON %I.%I FOR SELECT TO authenticated
+                      USING (empresa_id IN (SELECT seguridad.empresas_del_usuario()))$f$,
+                   t.table_schema, t.table_name);
+  END LOOP;
+
+  ALTER TABLE sync.senal ENABLE ROW LEVEL SECURITY;
+  DROP POLICY IF EXISTS p_senal_lectura ON sync.senal;
+  CREATE POLICY p_senal_lectura ON sync.senal FOR SELECT TO authenticated
+    USING (empresa_id IN (SELECT seguridad.empresas_del_usuario()));
+
+  IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime')
+     AND NOT EXISTS (SELECT 1 FROM pg_publication_tables
+                      WHERE pubname = 'supabase_realtime' AND schemaname = 'sync' AND tablename = 'senal') THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE sync.senal;
+  END IF;
+END $$;
 ```
 
 ### 6.14 `090_semillas.sql` (roles y permisos por actor)
@@ -2203,10 +2226,10 @@ export class PedidosModule implements OnModuleInit {
 
   onModuleInit() {
     // 1) Comandos que llegan desde los dispositivos offline
-    this.sync.registrar('pedidos.pedido.guardar_borrador', async (u, datos) => {
+    this.sync.registrar('pedidos.pedido.guardar_borrador', 'pedidos.pedido.crear', 'pedidos.pedido.crear', async (u, datos) => {
       await this.guardar.ejecutar(u.empresaId, u.id, datos); return {};
     });
-    this.sync.registrar('pedidos.pedido.confirmar', (u, datos: any) =>
+    this.sync.registrar('pedidos.pedido.confirmar', 'pedidos.pedido.confirmar', 'pedidos.pedido.confirmar', (u, datos: any) =>
       this.confirmar.ejecutar({ empresaId: u.empresaId, pedidoId: datos.pedidoId, usuarioId: u.id }));
 
     // 2) Mantener el modelo de cliente de Pedidos a partir del catálogo (el límite de crédito lo fija el supervisor/admin)
@@ -2450,7 +2473,7 @@ export class FabricacionModule implements OnModuleInit {
     });
 
     // Planificador: liberar OF
-    this.sync.registrar('fabricacion.orden.liberar', async (u, d: { ordenId: string }) => {
+    this.sync.registrar('fabricacion.orden.liberar', 'fabricacion.orden.liberar', 'fabricacion.orden.liberar', async (u, d: { ordenId: string }) => {
       const r = await this.bd.consultar(
         `UPDATE fabricacion.orden_fabricacion SET estado='LIBERADA', liberada_por=$3, liberada_en=now()
           WHERE id=$1 AND empresa_id=$2 AND estado='PLANIFICADA' RETURNING id`, [d.ordenId, u.empresaId, u.id]);
@@ -2459,7 +2482,7 @@ export class FabricacionModule implements OnModuleInit {
     });
 
     // Planificador: reportar cantidades producidas (idempotente por idempotencyKey)
-    this.sync.registrar('fabricacion.orden.reportar', async (u, d: { ordenId: string; cantidad: number }, clave) => {
+    this.sync.registrar('fabricacion.orden.reportar', 'fabricacion.orden.reportar', 'fabricacion.orden.reportar', async (u, d: { ordenId: string; cantidad: number }, clave) => {
       const nuevo = await this.bd.consultar(
         `INSERT INTO fabricacion.reporte_produccion (empresa_id, orden_id, cantidad, reportado_por, idempotency_key)
          VALUES ($1,$2,$3,$4,$5) ON CONFLICT (idempotency_key) DO NOTHING RETURNING id`, [u.empresaId, d.ordenId, d.cantidad, u.id, clave]);
@@ -3045,10 +3068,17 @@ import type { UsuarioAutenticado } from '../../infraestructura/auth';
 
 export type ComandoSync = (usuario: UsuarioAutenticado, datos: any, idempotencyKey: string) => Promise<Record<string, unknown>>;
 
+/** ¿El usuario puede ejecutar algo que exige este permiso? (mismo criterio que AuthGuard: el administrador pasa) */
+export function tienePermiso(u: { roles: string[]; permisos: string[] }, permiso: string): boolean {
+  return u.roles.includes('administrador') || u.permisos.includes(permiso);
+}
+
 @Injectable()
 export class RegistroComandosSync {
-  private comandos = new Map<string, ComandoSync>();
-  registrar(tipo: string, fn: ComandoSync) { this.comandos.set(tipo, fn); }
+  private comandos = new Map<string, { fn: ComandoSync; permiso: string }>();
+
+  /** El permiso es OBLIGATORIO: un comando sin permiso declarado no se puede registrar (RBAC en cada comando de sync). */
+  registrar(tipo: string, permiso: string, fn: ComandoSync) { this.comandos.set(tipo, { fn, permiso }); }
   obtener(tipo: string) { return this.comandos.get(tipo); }
 }
 ```
@@ -3060,7 +3090,7 @@ import { z } from 'zod';
 import { AuthGuard } from '../../infraestructura/auth';
 import { BaseDatos } from '../../infraestructura/base-datos';
 import { ErrorNegocio } from '../../kernel/errores';
-import { RegistroComandosSync } from './registro-comandos';
+import { RegistroComandosSync, tienePermiso } from './registro-comandos';
 
 const PushSchema = z.object({
   dispositivoId: z.string().uuid(),
@@ -3106,12 +3136,15 @@ export class SincronizacionController {
         `SELECT resultado FROM sync.operacion_procesada WHERE idempotency_key = $1`, [op.idempotencyKey]);
       if (previo) { resultados.push(previo.resultado); continue; }
 
-      const comando = this.registro.obtener(op.tipo);
-      if (!comando) throw new BadRequestException(`Operación desconocida: ${op.tipo}`);
+      const registrado = this.registro.obtener(op.tipo);
+      if (!registrado) throw new BadRequestException(`Operación desconocida: ${op.tipo}`);
+      const comando = registrado.fn;
 
       let resultado: any;
       try {
         resultado = await this.bd.transaccion(async () => {
+          if (!tienePermiso(u, registrado.permiso))      // RBAC por comando
+            throw new ErrorNegocio('SIN_PERMISO', `Su rol no puede ejecutar ${op.tipo} (falta ${registrado.permiso})`);
           const datos = await comando(u, op.datos, op.idempotencyKey);
           const r = { idempotencyKey: op.idempotencyKey, estado: 'OK', datos };
           await this.guardarProcesada(u.empresaId, dispositivoId, op, r);
@@ -3163,7 +3196,7 @@ export class SincronizacionController {
 // src/modulos/sincronizacion/sincronizacion.module.ts
 import { Global, Module } from '@nestjs/common';
 import { AuthGuard } from '../../infraestructura/auth';
-import { RegistroComandosSync } from './registro-comandos';
+import { RegistroComandosSync, tienePermiso } from './registro-comandos';
 import { SincronizacionController } from './sincronizacion.controller';
 
 @Global()
@@ -4584,3 +4617,106 @@ Los tiempos son referencias para un equipo pequeño (2–3 desarrolladores) y de
 6. **Política de conflictos** para catálogos (última escritura gana vs. revisión manual).
 7. **Volumen esperado** (documentos/día, usuarios concurrentes) para validar el VPS y el uso del bloqueo consultivo en `sync.fn_registrar_cambio`.
 8. **Versiones:** fijar versiones exactas en `pnpm-lock.yaml` y revisar la documentación vigente de Next.js, Serwist, Supabase y NestJS al iniciar, ya que sus APIs evolucionan con rapidez.
+
+
+---
+
+## 18. Módulos Compras y Despacho (implementación completa)
+
+Ambos módulos siguen el patrón de Pedidos: **dominio puro** (sin imports de framework) → **aplicación** (casos de uso transaccionales) → **infraestructura** (repos `pg`, adaptadores) → **presentación** (controladores REST + comandos offline).
+
+### 18.1 Compras
+
+| Pieza | Archivo | Responsabilidad |
+|---|---|---|
+| Agregado `OrdenCompra` | `compras/dominio/orden-compra.ts` | Estados BORRADOR → PENDIENTE_APROBACION → APROBADA → ENVIADA → RECIBIDA_PARCIAL → RECIBIDA → CERRADA / ANULADA; segregación de funciones (quien crea no aprueba por encima del umbral `OC_UMBRAL_SEGREGACION`, por defecto 5.000.000); **R11** en `cerrar()`; recepción atómica (todo o nada) |
+| Agregado `Proveedor` | `compras/dominio/proveedor.ts` | NIT, correo y plazo validados; no se desactiva con órdenes abiertas |
+| Casos de uso | `compras/aplicacion/*` | Guardar proveedor, borrador, transiciones, registrar recepción (idempotente por `recepcionId`) |
+| API | `/v1/compras/...`, `/v1/compras/proveedores` | Permisos `compras.proveedor.gestionar`, `compras.orden.crear/aprobar/ver`, `compras.recepcion.registrar` |
+| Offline | `compras.proveedor.guardar`, `compras.orden.guardar_borrador`, `compras.recepcion.registrar` | El comprador deja borradores y el bodeguero recibe sin conexión; aprobar/enviar/cerrar/anular exigen conexión |
+
+**Evento clave:** `compras.RecepcionRegistrada` (vía Outbox) → Inventarios asienta `ENTRADA_COMPRA` en el kardex (R5) con el costo de la línea de la orden. La vista `compras.v_pendiente_recibir` alimenta la pantalla del bodeguero.
+
+**R11 en dos capas:** el agregado rechaza `cerrar()` con `R11_OC_SIN_RECIBIR` y el trigger `trg_r11_cierre_oc` (SQLSTATE 23514) lo garantiza aunque alguien escriba directo en la BD.
+
+### 18.2 Despacho
+
+| Pieza | Archivo | Responsabilidad |
+|---|---|---|
+| Agregado `Despacho` | `despacho/dominio/despacho.ts` | PROGRAMADO → DESPACHADO → ENTREGADO / FALLIDO (→ reintento) y CANCELADO (solo antes de despachar); **R12** al programar: sin reservas activas no existe despacho |
+| Programar | `aplicacion/programar-despacho.ts` | Toma las reservas ACTIVAS del pedido no asignadas a otro despacho (admite despacho parcial por `pedidoLineaIds`); idempotente por `despachoId` |
+| Despachar | `aplicacion/despachar-pedido.ts` | `InventariosApi.consumirReservas` + kardex `SALIDA_DESPACHO` + cambio de estado + evento, **en una sola transacción**. Calcula `completo` comparando cantidades pedidas contra lo despachado |
+| Entrega | `aplicacion/transiciones-despacho.ts` | Entregar (receptor y evidencia), fallida, reintentar, cancelar, actualizar logística |
+| API | `/v1/despachos/...` | Permisos `despacho.despacho.ver/gestionar` |
+| Offline | `despacho.despacho.registrar`, `.entregar`, `.fallido` | El bodeguero y el transportador trabajan sin conexión; si al sincronizar la reserva ya no está activa, la operación vuelve **RECHAZADA** con `R12_SIN_RESERVA_ACTIVA` |
+
+**Acoplamiento controlado:** Despacho no lee tablas de otros esquemas. Usa `PedidosApi.obtenerParaDespachar` e `InventariosApi` mediante adaptadores anti-corrupción (`pedidos.adaptador.ts`, `inventarios.adaptador.ts`).
+
+**R12 en tres capas:** agregado (`Despacho.programar`), caso de uso (`consumirReservas` falla si alguna reserva no está ACTIVA) y trigger `trg_r12_despacho` (no se pasa a DESPACHADO si hay líneas sin reserva CONSUMIDA).
+
+**Corrección respecto a la versión anterior:** antes `completo` se deducía de `cantidad_a_fabricar > 0`; ahora se calcula con lo realmente despachado por línea, de modo que los despachos parciales no marcan el pedido como DESPACHADO.
+
+### 18.3 Base de datos y despliegue
+
+```bash
+psql -U crm_app -d crm -f db/scripts/110_compras_despacho.sql   # idempotente
+psql -U crm_app -d crm -f db/tests/compras_despacho.sql          # R11 y R12 (todo se revierte)
+```
+
+### 18.4 Otros cambios incluidos
+- `FiltroErrores` global: los errores de negocio responden **422** `{codigo, mensaje}` (antes 500) y Zod responde 400.
+- Corregidos dos defectos de compilación previos: imports faltantes en `aprobar-pedido.ts` y el tipo de retorno del comando `pedidos.pedido.confirmar`.
+- Web: pantallas `/compras` y `/despacho`, tablas Dexie v2 y repos offline; `TABLAS_POR_ROL` ampliado (vendedor y supervisor ven el estado de los despachos).
+
+### 18.5 Ajustes tras la validación contra la guía
+- **RBAC por comando de sincronización.** `RegistroComandosSync.registrar(tipo, permiso, fn)` exige el permiso; `/sync/push` lo comprueba antes de ejecutar y, si falta, devuelve `RECHAZADO` con código `SIN_PERMISO` (queda registrado y no se reintenta). El administrador pasa siempre, igual que en `AuthGuard`.
+
+  | Comando | Permiso |
+  |---|---|
+  | `pedidos.pedido.guardar_borrador` / `.confirmar` | `pedidos.pedido.crear` / `pedidos.pedido.confirmar` |
+  | `caja.cobro.registrar` | `caja.cobro.registrar` |
+  | `compras.proveedor.guardar` / `compras.orden.guardar_borrador` / `compras.recepcion.registrar` | `compras.proveedor.gestionar` / `compras.orden.crear` / `compras.recepcion.registrar` |
+  | `despacho.despacho.registrar` / `.entregar` / `.fallido` | `despacho.despacho.gestionar` |
+  | `fabricacion.orden.liberar` / `.reportar` | `fabricacion.orden.liberar` / `fabricacion.orden.reportar` |
+  | `catalogo.cliente.guardar` | `catalogo.cliente.gestionar` |
+
+- **`080_seguridad_rls.sql` portable.** Crea siempre `sync.senal` y su trigger; la RLS y la publicación de Realtime solo se configuran si existen `auth.uid()`, el rol `authenticated` y `supabase_realtime`. Es idempotente. En un PostgreSQL sin Supabase la API sigue filtrando por empresa.
+- **Facturación ya no escribe en el esquema de Pedidos.** Pedidos escucha `facturacion.FacturaEmitida` y guarda `factura_id` en su propio pedido (principio 1 y sección 12).
+
+---
+
+## 19. Frontend: sistema de diseño y pantallas
+
+El frontend usa un tema oscuro de ERP (referencias: Menú principal, Pedidos, Facturación, Caja, Despacho). Se construyó **sin dependencias nuevas** (solo Tailwind, React y Dexie que ya estaban) para no tocar `pnpm-lock.yaml`.
+
+### 19.1 Piezas compartidas
+| Archivo | Contenido |
+|---|---|
+| `tailwind.config.ts` | Colores semánticos (`fondo`, `panel`, `borde`, `texto`, `suave`, `azul`, `verde`, `ambar`, `rojo`, `violeta`) leídos de variables CSS; animaciones `entrar`/`aviso`. |
+| `app/globals.css` | Tokens (`--c-*`), clases de componente: `tarjeta`, `btn*`, `campo`, `tabla`, `insignia`/`i-*`, `aviso-caja`/`a-*`. Respeta `prefers-reduced-motion`. |
+| `componentes/ui.tsx` | `Insignia`, `ChipRegla` (R1–R14), `Encabezado`, `Panel`, `Indicador` con `Sparkline` SVG, `Pestanas`, `Modal` accesible, `Aviso`, `Barra`, `Campo`, y `ProveedorDialogos` (`pedirMotivo`, `confirmar`, `avisar`) que reemplaza `alert/prompt`. |
+| `componentes/Sesion.tsx` | Sesión, empresa, perfil y permisos (guardados en el dispositivo), estado de red, operaciones por sincronizar/rechazadas, `puede(permiso)`. |
+| `componentes/Shell.tsx` | Barra lateral (menú agrupado), cabecera con estado de sincronización y campana de operaciones rechazadas, menú móvil. |
+| `lib/estados.ts` | Texto y color de cada estado (pedido, factura, OF, orden de compra, despacho). |
+| `lib/formato.ts` | `dinero` (COP), `cantidad`, `fecha`, `numeroFactura`, `parecePan` (mismo criterio R10 que el servidor), `totalesLineas`. |
+| `offline/api.ts` | `ErrorHttp` conserva el cuerpo `{codigo, mensaje}` del 422; `mensajeError()` lo convierte en texto para la persona. |
+
+Las rutas viven en el grupo `app/(app)/` con un único `layout.tsx` (sesión + shell + `AutoSync`); `login`, `offline` y `auth/callback` quedan fuera del shell.
+
+### 19.2 Pantallas
+| Ruta | Qué resuelve |
+|---|---|
+| `/` Menú principal | Indicadores con tendencia (ventas del día, pedidos en curso, cartera, fabricación), pedidos recientes, uso de crédito (R13), OF, facturas, despachos y las 14 reglas. Todo desde Dexie. |
+| `/pedidos` | Constructor: cliente, bodega, canal, condición; búsqueda de artículos; por línea muestra stock, **reserva** y **OF automática** (R1/R2); tarjeta de crédito R13 con aviso de aprobación. Lista con filtros, detalle, Aprobar/Cancelar (en línea) y Facturar. |
+| `/facturacion` | Emitir factura (consecutivo R14 asignado por el servidor), saldo por factura (R7), vencidas, **anular = nota crédito** (R6) y cartera. |
+| `/caja` | Abrir turno (R8), cobro en efectivo offline, tarjeta/transferencia/cheque en línea con **solo token** (R10; bloquea un número de tarjeta), reverso (R9) y cierre con arqueo por denominaciones. |
+| `/inventarios` | Existencias por bodega (R3) y órdenes de fabricación: liberar y reportar producción también sin conexión (`offline/repos/fabricacion.ts`). |
+| `/despacho` | Pedidos con reserva activa/parcial/ninguna, líneas despachables, registro de despacho (R12) y seguimiento: entregado, fallido, reintentar. |
+| `/compras` | Órdenes con flujo de aprobación (R11), constructor multi-línea, recepción con tope de lo pendiente, proveedores. |
+| `/datos` | Consulta y alta de artículos y clientes. |
+
+### 19.3 Criterios que se mantuvieron
+- Las acciones que el servidor exige **en línea** (aprobar, emitir, anular, reversar, cerrar caja) se deshabilitan sin conexión con una explicación; las que son offline-first siguen encolándose en el outbox.
+- Los permisos solo ocultan o deshabilitan botones; la autoridad sigue siendo `AuthGuard` y `/sync/push` (sección 18.5).
+- Los errores de negocio (422) se muestran con el mensaje del servidor, no con un texto genérico.
+- No hay `alert()` ni `prompt()` en la interfaz; los motivos se piden en un modal.

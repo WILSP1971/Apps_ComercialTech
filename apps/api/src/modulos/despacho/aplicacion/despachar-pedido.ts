@@ -1,43 +1,57 @@
 // src/modulos/despacho/aplicacion/despachar-pedido.ts
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { BaseDatos } from '../../../infraestructura/base-datos';
 import { PublicadorEventos } from '../../../infraestructura/eventos';
 import { ErrorNegocio } from '../../../kernel/errores';
-import { InventariosApi } from '../../inventarios';
+import { lanzarSiFalla } from '../../../kernel/error-dominio';
+import {
+  DESPACHO_REPOSITORIO, DespachoRepositorio, INVENTARIOS_DESPACHO_PUERTO, InventariosDespachoPuerto,
+  PEDIDOS_DESPACHO_PUERTO, PedidosDespachoPuerto,
+} from '../dominio/repositorio';
+import { ProgramarDespacho } from './programar-despacho';
 
 @Injectable()
 export class DespacharPedido {
-  constructor(private readonly bd: BaseDatos, private readonly inv: InventariosApi, private readonly eventos: PublicadorEventos) {}
+  constructor(
+    @Inject(DESPACHO_REPOSITORIO) private readonly despachos: DespachoRepositorio,
+    @Inject(INVENTARIOS_DESPACHO_PUERTO) private readonly inventarios: InventariosDespachoPuerto,
+    @Inject(PEDIDOS_DESPACHO_PUERTO) private readonly pedidos: PedidosDespachoPuerto,
+    private readonly programar: ProgramarDespacho,
+    private readonly bd: BaseDatos,
+    private readonly eventos: PublicadorEventos,
+  ) {}
 
-  /** Bodeguero. R12: sin reserva ACTIVA no hay despacho (InventariosApi lanza R12_SIN_RESERVA_ACTIVA). */
-  async ejecutar(u: { empresaId: string; id: string }, d: { despachoId: string; pedidoId: string; direccionEntrega: string }) {
+  /**
+   * Bodeguero. R12: sin reserva ACTIVA no hay salida de mercadería.
+   * Sirve para despachar uno ya programado o, en un solo paso (como el comando offline), programar y despachar.
+   * Idempotente: repetir la operación sobre un despacho ya despachado no vuelve a mover inventario.
+   */
+  async ejecutar(u: { empresaId: string; id: string }, entrada: unknown) {
     return this.bd.transaccion(async () => {
-      const [ya] = await this.bd.consultar(`SELECT id FROM despacho.despacho WHERE id=$1 AND empresa_id=$2`, [d.despachoId, u.empresaId]);
-      if (ya) return {};                                                                  // reintento idempotente
-
-      const reservas = await this.inv.reservasActivas(u.empresaId, d.pedidoId);
-      if (reservas.length === 0) throw new ErrorNegocio('R12_SIN_RESERVA_ACTIVA', 'El pedido no tiene stock reservado para despachar');
-
-      const [p] = await this.bd.consultar(`SELECT cliente_id, bodega_id FROM pedidos.pedido WHERE id=$1 AND empresa_id=$2`, [d.pedidoId, u.empresaId]);
-      // ^ lectura de solo los 2 campos que Despacho necesita; en una versión más estricta se pide a PedidosApi.
-
-      await this.inv.consumirReservas({ empresaId: u.empresaId, reservaIds: reservas.map(r => r.id), despachoId: d.despachoId, usuarioId: u.id });
-      await this.bd.consultar(
-        `INSERT INTO despacho.despacho (id, empresa_id, pedido_id, cliente_id, bodega_id, direccion_entrega, estado, despachado_por, despachado_en)
-         VALUES ($1,$2,$3,$4,$5,$6,'DESPACHADO',$7,now())`,
-        [d.despachoId, u.empresaId, d.pedidoId, p.cliente_id, p.bodega_id, d.direccionEntrega, u.id]);
-      for (const r of reservas) {
-        await this.bd.consultar(
-          `INSERT INTO despacho.despacho_linea (id, empresa_id, despacho_id, pedido_linea_id, articulo_id, cantidad, reserva_id)
-           VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6)`, [u.empresaId, d.despachoId, r.pedido_linea_id, r.articulo_id, r.cantidad, r.id]);
+      const despacho = await this.programar.ejecutar(u, entrada);        // devuelve el existente o crea uno nuevo
+      if (despacho.estado !== 'PROGRAMADO') {
+        if (['DESPACHADO', 'ENTREGADO', 'FALLIDO'].includes(despacho.estado))
+          return { despachoId: despacho.id, numero: despacho.numero, estado: despacho.estado };      // ya despachado
+        throw new ErrorNegocio('DESPACHO_ESTADO_INVALIDO', `No se puede despachar un despacho ${despacho.estado}`);
       }
-      const [pend] = await this.bd.consultar(
-        `SELECT count(*)::int AS n FROM pedidos.pedido_linea WHERE pedido_id=$1 AND eliminado_en IS NULL AND cantidad_a_fabricar > 0`, [d.pedidoId]);
-      await this.eventos.publicar([{
-        tipo: 'despacho.DespachoRealizado', agregadoId: d.despachoId, empresaId: u.empresaId, ocurrioEn: new Date(),
-        datos: { despachoId: d.despachoId, pedidoId: d.pedidoId, completo: pend.n === 0 },
-      }]);
-      return {};
+
+      // R12: consumir reservas ACTIVAS (si alguna dejó de estarlo, se rechaza todo el despacho)
+      await this.inventarios.consumirReservas({
+        empresaId: u.empresaId, reservaIds: despacho.lineas.map(l => l.reservaId), despachoId: despacho.id, usuarioId: u.id,
+      });
+
+      // ¿Queda el pedido totalmente despachado? (cantidad ya despachada + este despacho >= cantidad pedida)
+      const pedido = await this.pedidos.obtener(u.empresaId, despacho.pedidoId);
+      const yaDespachado = await this.despachos.despachadoPorLinea(u.empresaId, despacho.pedidoId);
+      const esteDespacho = new Map<string, number>();
+      for (const l of despacho.lineas) esteDespacho.set(l.pedidoLineaId, (esteDespacho.get(l.pedidoLineaId) ?? 0) + l.cantidad);
+      const completo = !!pedido && pedido.lineas.every(l =>
+        (yaDespachado.get(l.id) ?? 0) + (esteDespacho.get(l.id) ?? 0) >= l.cantidad);
+
+      lanzarSiFalla(despacho.despachar(u.id, completo));
+      await this.despachos.guardar(despacho);
+      await this.eventos.publicar(despacho.extraerEventos());
+      return { despachoId: despacho.id, numero: despacho.numero, estado: despacho.estado, completo };
     });
   }
 }
