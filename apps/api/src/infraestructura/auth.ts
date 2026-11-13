@@ -35,7 +35,7 @@ export class AuthGuard implements CanActivate {
       sub = String(payload.sub);
     } catch { throw new UnauthorizedException('Token inválido o vencido'); }
 
-    const empresaSolicitada = (req.headers['x-empresa-id'] as string | undefined) ?? null;
+    const empresaSolicitada = ((req.headers['x-empresa-id'] as string | undefined) || null);   // vacío = sin empresa elegida
     const llave = `${sub}:${empresaSolicitada}`;
     let entrada = this.cache.get(llave);
     if (!entrada || entrada.hasta < Date.now()) {
